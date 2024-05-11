@@ -3,103 +3,152 @@
 import { SignedOut, SignedIn } from "@clerk/nextjs";
 import type { ApexOptions } from "apexcharts";
 import { useEffect, useState } from "react";
-import ReactApexChart from "react-apexcharts";
 import { data } from "~/constants";
-// import { db } from "~/server/db";
+import {
+  ERemitente,
+  type IData,
+  type ICandle,
+  type IMensaje,
+  type IStock,
+  type ICarteraDeAcciones,
+} from "~/types";
+import dynamic from "next/dynamic";
+import Image from "next/image";
 
-export const dynamic = "force-dynamic";
-
-/*async function Images() {
-  const images = await db.query.images.findMany({
-    orderBy: (model, { asc }) => asc(model.name),
-  });
-  return (
-    <div className="flex flex-wrap gap-4">
-      {images.map((img) => (
-        <div key={img.id} className="w-48 p-4">
-          <img src={img.url} />
-          <div>{img.name}</div>
-        </div>
-      ))}
-    </div>
-  );
-}*/
-interface IData {
-  timestamp: string;
-  open: number;
-  low: number;
-  high: number;
-  close: number;
-}
-interface ICandle {
-  x: Date;
-  y: number[];
-}
-const enum ERemitente {
-  MAQUINA,
-  PERSONA,
-}
-interface IMensaje {
-  orden: number;
-  text: string;
-  remitente: ERemitente;
-}
+const ChartDynamic = dynamic(() => import("./_components/chart"), {
+  ssr: false,
+});
 
 export default function HomePage() {
   const [candlesData, setCandlesData] = useState<ICandle[]>([]);
   const [selectFilter, setSelectFilter] = useState(0);
-  const [mensajes, setMensajes] = useState<IMensaje[]>([]);
+  const [mensajes, setMensajes] = useState<IMensaje[]>([
+    {
+      orden: 0,
+      remitente: ERemitente.MAQUINA,
+      text: "Hola soy StockBot, necesitas un consejo? :)",
+    },
+  ]);
   const [inputChat, setInputChat] = useState("");
   const [loadingResponse, setLoadingResponse] = useState(false);
+  const [userStock, setUserStock] = useState<IStock | null>(null);
+  const [carteraDeAcciones, setCarteraDeAcciones] =
+    useState<ICarteraDeAcciones | null>({ earn: 0, total: 0 });
+  const [stockLatestPrice, setStockLatestPrice] = useState(0);
 
   const filters = ["hoy", "3d", "1w", "1m", "6m", "1y", "5y"];
 
   useEffect(() => {
-    //if (data.series[0]) setCandlesData(data.series[0].data);
+    // if (data.series[0]) setCandlesData(data.series[0].data);
+    // setStockLatestPrice(600);
     void getCandlesDataByFilter();
+    void getUserStock();
   }, []);
+  useEffect(() => {
+    updateCarteraDeAcciones();
+  }, [userStock, stockLatestPrice]);
 
+  const getUserStock = async () => {
+    const res = await fetch("/api/stocks");
+    const { stock } = (await res.json()) as { stock: IStock };
+    setUserStock(stock);
+  };
   const filterDataByDate = async (date: string) => {
     setSelectFilter(filters.findIndex((d) => d === date));
     await getCandlesDataByFilter(date);
   };
   const askAI = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== "Enter") return;
-    void getResponseFromAI(inputChat);
     setInputChat("");
+    void getResponseFromAI(inputChat);
   };
   const getResponseFromAI = async (messageForAI: string) => {
     setLoadingResponse(true);
-    setMensajes((msjs) => [
-      ...msjs,
+    const mensajesWithNew = [
+      ...mensajes,
       {
         orden: mensajes.length + 1,
         text: messageForAI,
         remitente: ERemitente.PERSONA,
       },
-    ]);
-    const res = await fetch("http://localhost:8000", {
+    ];
+    setMensajes(mensajesWithNew);
+    const res = await fetch("http://localhost:8000/agent/invoke", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messageForAI }),
+      body: JSON.stringify({
+        input: {
+          input: messageForAI,
+          chat_history: mensajesWithNew.map((m) => ({
+            type: m.remitente,
+            content: m.text,
+          })),
+        },
+      }),
     });
-
-    if (!res.ok) throw new Error(`Error en la solicitud: ${res.status}`);
-
-    const response = (await res.json()) as { respuesta: string };
-    console.log(response);
+    const {
+      output: { output: response },
+    } = (await res.json()) as { output: { output: string } };
     setLoadingResponse(false);
-    setMensajes((msjs) => [
-      ...msjs,
-      {
-        orden: msjs.length + 1,
-        text: response.respuesta,
-        remitente: ERemitente.MAQUINA,
-      },
-    ]);
+    mensajesWithNew.push({
+      orden: mensajesWithNew.length + 1,
+      text: response,
+      remitente: ERemitente.MAQUINA,
+    });
+    setMensajes(mensajesWithNew);
+  };
+  const updateCarteraDeAcciones = () => {
+    if (!userStock || stockLatestPrice === 0) return null;
+    const costoAhora = userStock.numberOfStocks * stockLatestPrice;
+    setCarteraDeAcciones({
+      earn: costoAhora - userStock.totalCostOfStocks,
+      total: costoAhora,
+    });
+  };
+  const sellStock = async () => {
+    if (!userStock) return;
+    const cash =
+      Number(userStock.cash) + stockLatestPrice * userStock.numberOfStocks;
+    const [numberOfStocks, totalCostOfStocks] = [0, 0];
+    setUserStock({ ...userStock, numberOfStocks, totalCostOfStocks, cash });
+    await fetch("/api/stocks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ numberOfStocks, totalCostOfStocks, cash }),
+    });
+  };
+  const addCash = async () => {
+    if (!userStock) return;
+    const cash = Number(userStock.cash) + 1000;
+    setUserStock({
+      ...userStock,
+      cash,
+    });
+    await fetch("/api/stocks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        numberOfStocks: userStock.numberOfStocks,
+        totalCostOfStocks: userStock.totalCostOfStocks,
+        cash,
+      }),
+    });
+  };
+  const buyStock = async () => {
+    if (!userStock) return;
+    const numberOfStocks = Number(userStock.numberOfStocks) + 1;
+    const totalCostOfStocks =
+      Number(userStock.totalCostOfStocks) + stockLatestPrice;
+    const cash = Number(userStock.cash) - stockLatestPrice;
+    setUserStock({ ...userStock, numberOfStocks, totalCostOfStocks, cash });
+    await fetch("/api/stocks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ numberOfStocks, totalCostOfStocks, cash }),
+    });
   };
   const getCandlesDataByFilter = async (date = "hoy") => {
-    const res = await fetch("http://localhost:8001", {
+    const res = await fetch("/api/alpaca", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ intervalo: date }),
@@ -108,12 +157,18 @@ export default function HomePage() {
     if (!res.ok) throw new Error(`Error en la solicitud: ${res.status}`);
 
     const response = (await res.json()) as { respuesta: IData[] };
+    if (stockLatestPrice === 0)
+      setStockLatestPrice(
+        response.respuesta[response.respuesta.length - 1]?.HighPrice ?? 0,
+      );
+    // setStockLatestPrice(200);
     const candlesFormat = response.respuesta.map((r) => ({
-      x: new Date(r.timestamp),
-      y: [r.open, r.high, r.low, r.close],
+      x: new Date(r.Timestamp),
+      y: [r.OpenPrice, r.HighPrice, r.LowPrice, r.ClosePrice],
     }));
     setCandlesData(candlesFormat);
   };
+
   return (
     <main>
       <SignedOut>
@@ -124,90 +179,157 @@ export default function HomePage() {
         </div>
       </SignedOut>
       <SignedIn>
-        <div className="flex flex-row justify-between gap-3 p-6">
-          <div className="w-full">
-            <div className="mb-1 flex items-center gap-5">
-              <h3 className="text-2xl font-medium text-gray-800">
-                Gráfico de Velas{" "}
-                <strong className="text-gray-500">(SPY)</strong>
-              </h3>
-            </div>
-            <div className="h-[50vh] rounded-xl border-2 border-gray-300">
-              <ReactApexChart
-                options={data.options as unknown as ApexOptions}
-                series={
-                  [{ data: candlesData }] as unknown as ApexAxisChartSeries
-                }
-                type="candlestick"
-                height={380}
-              />
-            </div>
-            <div className="mt-2 flex items-center gap-1">
-              <p className="text-sm">Filtros de fecha: </p>
-              {filters.map((f, idx) => (
-                <button
-                  key={idx}
-                  className="btn btn-xs btn-primary text-white"
-                  style={{
-                    backgroundColor:
-                      idx === selectFilter ? "#6e00ff" : "#7480ff",
-                  }}
-                  onClick={() => filterDataByDate(f)}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="w-3/12">
-            <h3 className="mb-1 text-2xl font-medium text-gray-800">
-              Trading Bot
-            </h3>
-            <div className="h-[50vh] rounded-xl border-2 border-gray-300">
-              <div className="h-[87.5%] overflow-auto">
-                <div className="chat chat-start">
-                  <div className="chat-bubble chat-bubble-primary text-sm text-white">
-                    Hola, estoy aquí para ayudarte :{")"}
-                  </div>
-                </div>
-                {mensajes.map((m, idx) => (
-                  <div
-                    key={idx}
-                    className={
-                      "chat " +
-                      (m.remitente === ERemitente.MAQUINA
-                        ? "chat-start"
-                        : "chat-end")
-                    }
-                  >
-                    <div
-                      className={
-                        "chat-bubble text-sm text-white " +
-                        (m.remitente === ERemitente.MAQUINA
-                          ? "chat-bubble-primary"
-                          : "chat-bubble-info")
-                      }
-                    >
-                      {m.text}
+        <div className="p-6">
+          <div className="space-y-5">
+            <div className="flex gap-3">
+              <div className="flex gap-3 rounded-xl border-2 border-gray-200 p-4">
+                <Image
+                  src="https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg"
+                  width={35}
+                  height={35}
+                  alt="msft logo"
+                />
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-bold text-gray-600">MFST</div>
+                    <div className="flex items-end">
+                      <span className="mr-1 pb-[0.2rem] text-xs">precio: </span>
+                      <div>${!userStock ? "-" : stockLatestPrice}</div>
                     </div>
                   </div>
-                ))}
+                  <div className="flex items-center gap-10">
+                    <span className="text-xs">Microsoft Inc.</span>
+                    <button
+                      className="btn btn-primary btn-xs text-white"
+                      onClick={buyStock}
+                    >
+                      Comprar
+                    </button>
+                  </div>
+                </div>
               </div>
-              <div className="flex h-[12.5%] items-center justify-center border-t-2 border-gray-300">
-                <input
-                  className="mx-1.5 w-full rounded-lg bg-gray-100 p-1.5 text-sm"
-                  type="text"
-                  placeholder="Pregunta algo..."
-                  onChange={(e) => setInputChat(e.target.value)}
-                  onKeyUp={askAI}
-                />
+              <div className="flex flex-col gap-2 rounded-xl border-2 border-gray-200 p-4">
+                <div className="flex items-center gap-10">
+                  <div className="font-bold text-gray-600">
+                    Cartera de Acciones
+                  </div>
+                  <span className="mt-0.5 text-xs">
+                    {!userStock ? "-" : userStock.numberOfStocks} acciones
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center">
+                    {carteraDeAcciones && (
+                      <>
+                        <div>{carteraDeAcciones?.total.toFixed(2)}$</div>
+                        {carteraDeAcciones?.earn !== 0 && (
+                          <span
+                            className={`ml-2 text-sm
+                            ${
+                              carteraDeAcciones.earn < 0
+                                ? "text-red-500"
+                                : "text-green-500"
+                            } `}
+                          >
+                            {carteraDeAcciones?.earn >= 0 && "+"}
+                            {carteraDeAcciones?.earn.toFixed(2)}$
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <button
+                    className="btn btn-primary btn-xs text-white"
+                    onClick={sellStock}
+                  >
+                    Vender
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2 rounded-xl border-2 border-gray-200 p-4">
+                <div className="flex items-center gap-16">
+                  <div className="font-bold text-gray-600">Cash</div>
+                  <button
+                    className="btn btn-primary btn-xs text-white"
+                    onClick={addCash}
+                  >
+                    +
+                  </button>
+                </div>
+                <div className="flex items-center justify-between gap-10">
+                  {!userStock ? "-" : Number(userStock?.cash).toFixed(2)}$
+                </div>
               </div>
             </div>
-            {loadingResponse && (
-              <div className="text-primary mt-1 w-full text-center text-xs font-bold">
-                La IA está pensando...
+            <div className="flex gap-3">
+              <div className="w-full">
+                <div className="h-[50vh] rounded-xl border-2 border-gray-200">
+                  <ChartDynamic
+                    options={data.options as unknown as ApexOptions}
+                    data={
+                      [{ data: candlesData }] as unknown as ApexAxisChartSeries
+                    }
+                  />
+                </div>
+                <div className="mt-2 flex items-center gap-1">
+                  <p className="text-sm">Filtros de fecha: </p>
+                  {filters.map((f, idx) => (
+                    <button
+                      key={idx}
+                      className="btn btn-primary btn-xs text-white"
+                      style={{
+                        backgroundColor:
+                          idx === selectFilter ? "#6e00ff" : "#7480ff",
+                      }}
+                      onClick={() => filterDataByDate(f)}
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
+              <div className="h-[50vh] w-4/12 rounded-xl border-2 border-gray-200">
+                <div className="h-5/6 overflow-auto px-1.5 py-4">
+                  {mensajes.map((m, idx) => (
+                    <div
+                      key={idx}
+                      className={
+                        "chat " +
+                        (m.remitente === ERemitente.MAQUINA
+                          ? "chat-start"
+                          : "chat-end")
+                      }
+                    >
+                      <div
+                        className={
+                          "chat-bubble text-sm text-white " +
+                          (m.remitente === ERemitente.MAQUINA
+                            ? "chat-bubble-primary"
+                            : "chat-bubble-info")
+                        }
+                      >
+                        {m.text}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex h-1/6 items-center justify-center">
+                  <input
+                    className="h-full w-full rounded-b-lg bg-gray-50 p-3 text-sm text-gray-600"
+                    type="text"
+                    placeholder="Pregunta algo..."
+                    onChange={(e) => setInputChat(e.target.value)}
+                    value={inputChat}
+                    onKeyUp={askAI}
+                  />
+                </div>
+                {loadingResponse && (
+                  <div className="mt-1 w-full text-center text-xs font-bold text-primary">
+                    La IA está pensando...
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </SignedIn>

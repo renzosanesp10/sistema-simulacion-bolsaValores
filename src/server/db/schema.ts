@@ -3,9 +3,11 @@
 
 import { sql } from "drizzle-orm";
 import {
+  integer,
   numeric,
   pgTableCreator,
   serial,
+  text,
   timestamp,
 } from "drizzle-orm/pg-core";
 
@@ -19,14 +21,19 @@ export const createTable = pgTableCreator((name) => `trading-app_${name}`);
 
 export const users = createTable("user", {
   id: serial("id").primaryKey(),
+  externalId: numeric("external_id").notNull(),
+  attributes: text("attributes").notNull(),
   createdAt: timestamp("created_at")
     .default(sql`CURRENT_TIMESTAMP`)
     .notNull(),
   updatedAt: timestamp("updatedAt"),
 });
-export const transactions = createTable("transactions_user", {
+export const stockUser = createTable("stock_user", {
   id: serial("id").primaryKey(),
-  numberOfStocks: numeric("number_of_stocks").notNull(),
+  cash: numeric("cash").notNull(),
+  numberOfStocks: numeric("number_of_stocks"),
+  totalCostOfStocks: numeric("total_cost_of_stocks"),
+  userId: integer("user_id"),
   createdAt: timestamp("created_at")
     .default(sql`CURRENT_TIMESTAMP`)
     .notNull(),
