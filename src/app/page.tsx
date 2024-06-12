@@ -3,14 +3,18 @@
 import { SignedOut, SignedIn } from "@clerk/nextjs";
 import type { ApexOptions } from "apexcharts";
 import { useEffect, useState } from "react";
-import { data } from "~/constants";
+import { data, defaultMessages } from "~/constants";
 import {
   ERemitente,
   type IData,
   type ICandle,
   type IMensaje,
   type IStock,
-  type ICarteraDeAcciones,
+  type IStockUser,
+  type IStockInPossession,
+  type ITransaction,
+  type IInitPage,
+  ETypeTransaction,
 } from "~/types";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -21,21 +25,67 @@ const ChartDynamic = dynamic(() => import("./_components/chart"), {
   ssr: false,
 });
 
+const StockTableColumn = (props: { stock: IStock | undefined }) => {
+  if (!props.stock) return;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="avatar">
+        <div className="mask mask-squircle h-10 w-10">
+          <Image
+            src={
+              props.stock?.imageUrl ??
+              "https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg"
+            }
+            width={25}
+            height={25}
+            alt="msft logo"
+          />
+        </div>
+      </div>
+      <div>
+        <div className="text-xs font-bold">{props.stock.nameInMarket}</div>
+        <div className="text-xs opacity-50">{props.stock.name}</div>
+      </div>
+    </div>
+  );
+};
+const StockGanancia = (props: {
+  stock: IStock | undefined;
+  quantity: number;
+  totalCost: number;
+  stocksLatestPrice: Record<string, number>;
+}) => {
+  if (!props.stock) return;
+  const n = props.stock?.nameInMarket ?? "";
+  const price = props.stocksLatestPrice[n] ?? 0;
+  const ganancia = price * props.quantity - props.totalCost;
+  return (
+    <td
+      className={`text-bold ${ganancia < 0 ? "text-red-500" : "text-green-500"}`}
+    >
+      {ganancia > 0 && "+"}
+      {ganancia.toFixed(2)}$
+    </td>
+  );
+};
+
 export default function HomePage() {
   const [candlesData, setCandlesData] = useState<ICandle[]>([]);
   const [selectFilter, setSelectFilter] = useState(0);
-  const [mensajes, setMensajes] = useState<IMensaje[]>([
-    {
-      orden: 0,
-      remitente: ERemitente.MAQUINA,
-      text: "Hola soy StockBot, necesitas un consejo? :)",
-    },
-  ]);
+  const [tabSelected, setTabSelected] = useState(1);
+  const [mensajes, setMensajes] = useState<IMensaje[]>(defaultMessages);
   const [inputChat, setInputChat] = useState("");
   const [loadingResponse, setLoadingResponse] = useState(false);
-  const [userStock, setUserStock] = useState<IStock | null>(null);
-  const [carteraDeAcciones, setCarteraDeAcciones] =
-    useState<ICarteraDeAcciones | null>({ earn: 0, total: 0 });
+  const [userStock, setUserStock] = useState<IStockUser | null>(null);
+  const [stocks, setStocks] = useState<IStock[]>([]);
+  const [stockSelected, setStockSelected] = useState<IStock>();
+  const [stocksInPossession, setStocksInPossession] = useState<
+    IStockInPossession[]
+  >([]);
+  const [transactions, setTransactions] = useState<ITransaction[]>([]);
+  const [stocksLatestPrice, setStocksLatestPrice] = useState<
+    Record<string, number>
+  >({});
   const [stockLatestPrice, setStockLatestPrice] = useState(0);
   const { userId } = useAuth();
 
@@ -44,19 +94,25 @@ export default function HomePage() {
   useEffect(() => {
     // if (data.series[0]) setCandlesData(data.series[0].data);
     // setStockLatestPrice(600);
-    if (userId) {
-      void getCandlesDataByFilter();
-      void getUserStock();
-    }
+    if (userId) void initPage();
   }, [userId]);
   useEffect(() => {
-    updateCarteraDeAcciones();
-  }, [userStock, stockLatestPrice]);
+    if (!stockSelected) return;
+    void getCandlesDataByFilter(filters[selectFilter]);
+    setStockLatestPrice(stocksLatestPrice[stockSelected.nameInMarket] ?? 0);
+  }, [stockSelected]);
 
-  const getUserStock = async () => {
-    const res = await fetch("/api/stocks?userId=" + userId);
-    const { stock } = (await res.json()) as { stock: IStock };
-    setUserStock(stock);
+  const initPage = async () => {
+    const res = await fetch("/api/init-page?userId=" + userId);
+    const response = (await res.json()) as IInitPage;
+    console.log("response");
+    console.log(response);
+    setStocks(response.stocks);
+    setStockSelected(response.stocks[0]);
+    setStocksInPossession(response.stocksInPossessions);
+    setTransactions(response.transactions);
+    setUserStock(response.stockUser);
+    setStocksLatestPrice(response.stocksLatestPrice);
   };
   const filterDataByDate = async (date: string) => {
     setSelectFilter(filters.findIndex((d) => d === date));
@@ -73,12 +129,7 @@ export default function HomePage() {
       ...mensajes,
       {
         orden: mensajes.length + 1,
-        text:
-          messageForAI +
-          "--- metadata de este mensaje: userStock = " +
-          JSON.stringify(userStock) +
-          ", carteraDeAcciones = " +
-          JSON.stringify(carteraDeAcciones),
+        text: messageForAI,
         remitente: ERemitente.PERSONA,
       },
     ];
@@ -110,24 +161,51 @@ export default function HomePage() {
     });
     setMensajes(mensajesWithNew);
   };
-  const updateCarteraDeAcciones = () => {
-    if (!userStock || stockLatestPrice === 0) return null;
-    const costoAhora = userStock.numberOfStocks * stockLatestPrice;
-    setCarteraDeAcciones({
-      earn: costoAhora - userStock.totalCostOfStocks,
-      total: costoAhora,
+  const sellStock = async (p: IStockInPossession) => {
+    if (!userStock || !userId || !stockSelected) return;
+    const stock = stocks.find((s) => s.id === Number(p.stockId));
+    const stockLatestPriceOfP =
+      stocksLatestPrice[stock?.nameInMarket ?? ""] ?? 0;
+    const cash = Number(userStock.cash) + stockLatestPriceOfP * p.quantity;
+    const totalCostOfStocks = userStock.totalCostOfStocks - p.totalCost;
+    setUserStock({ ...userStock, totalCostOfStocks, cash });
+    const newStocksInP: IStockInPossession[] = stocksInPossession.map((s) => {
+      let { totalCost, quantity } = s;
+      if (s.id === p.id) {
+        totalCost = 0;
+        quantity = 0;
+      }
+      return { ...s, totalCost, quantity };
     });
-  };
-  const sellStock = async () => {
-    if (!userStock || !userId) return;
-    const cash =
-      Number(userStock.cash) + stockLatestPrice * userStock.numberOfStocks;
-    const [numberOfStocks, totalCostOfStocks] = [0, 0];
-    setUserStock({ ...userStock, numberOfStocks, totalCostOfStocks, cash });
+    setStocksInPossession(newStocksInP);
+    setTransactions((t) => [
+      {
+        id: new Date().getDate(),
+        invested: stockLatestPriceOfP * p.quantity,
+        type: ETypeTransaction.VENTA,
+        stockCost: stockLatestPriceOfP,
+        stockId: p.stockId,
+        userId: Number(userId),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      ...t,
+    ]);
     await fetch("/api/stocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ numberOfStocks, totalCostOfStocks, cash, userId }),
+      body: JSON.stringify({
+        totalCostOfStocks,
+        cash,
+        userId,
+        stockLatestPrice: stockLatestPriceOfP,
+        invested: stockLatestPriceOfP * p.quantity,
+        stockId: p.stockId,
+        type: ETypeTransaction.VENTA,
+        totalCost: 0,
+        quantity: 0,
+        stockInPosessionId: p.id,
+      }),
     });
   };
   const addCash = async () => {
@@ -141,41 +219,77 @@ export default function HomePage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        numberOfStocks: userStock.numberOfStocks,
+        // numberOfStocks: userStock.numberOfStocks,
         totalCostOfStocks: userStock.totalCostOfStocks,
         cash,
         userId,
       }),
     });
   };
-  const buyStock = async () => {
-    if (!userStock || !userId) return;
-    const numberOfStocks = Number(userStock.numberOfStocks) + 1;
+  const buyStock = () => {
+    if (!userStock || !userId || !stockSelected) return;
+    if (Number(userStock.cash) - stockLatestPrice < 0)
+      return alert("No tienes suficiente dinero");
     const totalCostOfStocks =
       Number(userStock.totalCostOfStocks) + stockLatestPrice;
     const cash = Number(userStock.cash) - stockLatestPrice;
-    setUserStock({ ...userStock, numberOfStocks, totalCostOfStocks, cash });
-    await fetch("/api/stocks", {
+    setUserStock({ ...userStock, totalCostOfStocks, cash });
+    let stockInPosessionId = 0;
+    let newTotalCost = 0;
+    let newQuantity = 0;
+    const newStocksInP: IStockInPossession[] = stocksInPossession.map((s) => {
+      let { totalCost, quantity } = s;
+      if (Number(s.stockId) === stockSelected.id) {
+        totalCost = Number(s.totalCost) + Number(stockLatestPrice);
+        newTotalCost = totalCost;
+        quantity = Number(s.quantity) + 1;
+        newQuantity = quantity;
+        stockInPosessionId = s.id;
+      }
+      return { ...s, totalCost, quantity };
+    });
+    setStocksInPossession(newStocksInP);
+    setTransactions((t) => [
+      {
+        id: new Date().getDate(),
+        invested: stockLatestPrice,
+        type: ETypeTransaction.COMPRA,
+        stockCost: stockLatestPrice,
+        stockId: String(stockSelected.id),
+        userId: Number(userId),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      ...t,
+    ]);
+    void fetch("/api/stocks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ numberOfStocks, totalCostOfStocks, cash, userId }),
+      body: JSON.stringify({
+        totalCostOfStocks,
+        cash,
+        userId,
+        stockLatestPrice,
+        invested: stockLatestPrice,
+        stockId: stockSelected.id,
+        type: ETypeTransaction.COMPRA,
+        totalCost: newTotalCost,
+        quantity: newQuantity,
+        stockInPosessionId,
+      }),
     });
   };
   const getCandlesDataByFilter = async (date = "hoy") => {
     const res = await fetch("/api/alpaca", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ intervalo: date }),
+      body: JSON.stringify({
+        intervalo: date,
+        stockName: stockSelected?.nameInMarket,
+      }),
     });
-
     if (!res.ok) throw new Error(`Error en la solicitud: ${res.status}`);
-
     const response = (await res.json()) as { respuesta: IData[] };
-    if (stockLatestPrice === 0)
-      setStockLatestPrice(
-        response.respuesta[response.respuesta.length - 1]?.ClosePrice ?? 0,
-      );
-    // setStockLatestPrice(200);
     const candlesFormat = response.respuesta.map((r) => ({
       x: new Date(r.Timestamp),
       y: [r.OpenPrice, r.HighPrice, r.LowPrice, r.ClosePrice],
@@ -194,25 +308,46 @@ export default function HomePage() {
       </SignedOut>
       <SignedIn>
         <div className="p-6">
-          <div className="space-y-5">
-            <div className="flex gap-3">
-              <div className="flex gap-3 rounded-xl border-2 border-gray-200 p-4">
+          <div className="space-y-3">
+            <div className="mb-5 flex gap-3">
+              <div className="flex gap-3 rounded-xl border border-gray-200 p-4">
                 <Image
-                  src="https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg"
+                  src={
+                    stockSelected?.imageUrl ??
+                    "https://upload.wikimedia.org/wikipedia/commons/4/44/Microsoft_logo.svg"
+                  }
                   width={35}
                   height={35}
                   alt="msft logo"
                 />
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="font-bold text-gray-600">MFST</div>
+                    <select
+                      className="select select-xs font-bold text-gray-600"
+                      onChange={async ({ target: { value: v } }) =>
+                        setStockSelected(stocks.find((s) => s.id === Number(v)))
+                      }
+                      value={stockSelected ? stockSelected.id : 0}
+                    >
+                      {stocks.map((s, i) => (
+                        <option key={i} value={s.id}>
+                          {s.nameInMarket}
+                        </option>
+                      ))}
+                    </select>
+
                     <div className="flex items-end">
                       <span className="mr-1 pb-[0.2rem] text-xs">precio: </span>
-                      <div>${!userStock ? "-" : stockLatestPrice}</div>
+                      <div>
+                        {stockLatestPrice
+                          ? stockLatestPrice.toFixed(2)
+                          : "0.00"}
+                        $
+                      </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-10">
-                    <span className="text-xs">Microsoft Inc.</span>
+                    <span className="ml-2 text-xs">{stockSelected?.name}</span>
                     <button
                       className="btn btn-primary btn-xs text-white"
                       onClick={buyStock}
@@ -222,45 +357,14 @@ export default function HomePage() {
                   </div>
                 </div>
               </div>
-              <div className="flex flex-col gap-2 rounded-xl border-2 border-gray-200 p-4">
-                <div className="flex items-center gap-10">
-                  <div className="font-bold text-gray-600">
-                    Cartera de Acciones
-                  </div>
-                  <span className="mt-0.5 text-xs">
-                    {!userStock ? "-" : userStock.numberOfStocks} acciones
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center">
-                    {carteraDeAcciones && (
-                      <>
-                        <div>{carteraDeAcciones?.total.toFixed(2)}$</div>
-                        {carteraDeAcciones?.earn !== 0 && (
-                          <span
-                            className={`ml-2 text-sm
-                            ${
-                              carteraDeAcciones.earn < 0
-                                ? "text-red-500"
-                                : "text-green-500"
-                            } `}
-                          >
-                            {carteraDeAcciones?.earn >= 0 && "+"}
-                            {carteraDeAcciones?.earn.toFixed(2)}$
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </div>
-                  <button
-                    className="btn btn-primary btn-xs text-white"
-                    onClick={sellStock}
-                  >
-                    Vender
-                  </button>
+              <div className="flex flex-col gap-2 rounded-xl border border-gray-200 p-4">
+                <div className="font-bold text-gray-600">Total Invertido</div>
+                <div className="flex items-center">
+                  {Number(userStock?.totalCostOfStocks ?? 0).toFixed(2)}$
                 </div>
               </div>
-              <div className="flex flex-col gap-2 rounded-xl border-2 border-gray-200 p-4">
+
+              <div className="flex flex-col gap-2 rounded-xl border border-gray-200 p-4">
                 <div className="flex items-center gap-16">
                   <div className="font-bold text-gray-600">Cash</div>
                   <button
@@ -271,10 +375,10 @@ export default function HomePage() {
                   </button>
                 </div>
                 <div className="flex items-center justify-between gap-10">
-                  {!userStock ? "-" : Number(userStock?.cash).toFixed(2)}$
+                  {!userStock ? "0.00" : Number(userStock?.cash).toFixed(2)}$
                 </div>
               </div>
-              <div className="ml-auto flex flex-col gap-2 rounded-xl border-2 border-gray-200 p-4">
+              <div className="ml-auto flex flex-col gap-2 rounded-xl border border-gray-200 p-4">
                 <div className="text-center font-bold text-gray-600">
                   Manual de Usuario
                 </div>
@@ -292,35 +396,162 @@ export default function HomePage() {
                 </button>
               </div>
             </div>
+            <div role="tablist" className="tabs-boxed tabs tabs-sm w-fit">
+              <a
+                role="tab"
+                className={`tab ${tabSelected === 1 && "tab-active"}`}
+                onClick={() => setTabSelected(1)}
+              >
+                Gráfico
+              </a>
+              <a
+                role="tab"
+                className={`tab ${tabSelected === 2 && "tab-active"}`}
+                onClick={() => setTabSelected(2)}
+              >
+                Historial
+              </a>
+              <a
+                role="tab"
+                className={`tab ${tabSelected === 3 && "tab-active"}`}
+                onClick={() => setTabSelected(3)}
+              >
+                Cartera
+              </a>
+              <a
+                role="tab"
+                className={`tab ${tabSelected === 4 && "tab-active"}`}
+                onClick={() => setTabSelected(4)}
+              >
+                Simulación
+              </a>
+            </div>
             <div className="flex gap-3">
               <div className="w-full">
-                <div className="h-[50vh] rounded-xl border-2 border-gray-200">
-                  <ChartDynamic
-                    options={data.options as unknown as ApexOptions}
-                    data={
-                      [{ data: candlesData }] as unknown as ApexAxisChartSeries
-                    }
-                  />
-                </div>
-                <div className="mt-2 flex items-center gap-1">
-                  <p className="text-sm">Filtros de fecha: </p>
-                  {filters.map((f, idx) => (
-                    <button
-                      key={idx}
-                      className="btn btn-primary btn-xs border-2 text-white"
-                      style={{
-                        backgroundColor:
-                          idx === selectFilter ? "#fff" : "#4a00ff",
-                        color: idx === selectFilter ? "#4a00ff" : "#fff",
-                      }}
-                      onClick={() => filterDataByDate(f)}
-                    >
-                      {f}
-                    </button>
-                  ))}
-                </div>
+                {tabSelected === 1 && (
+                  <>
+                    <div className="h-[50vh] rounded-xl border border-gray-200">
+                      <ChartDynamic
+                        options={data.options as unknown as ApexOptions}
+                        data={
+                          [
+                            { data: candlesData },
+                          ] as unknown as ApexAxisChartSeries
+                        }
+                      />
+                    </div>
+                    <div className="mt-2 flex items-center gap-1">
+                      <p className="text-sm">Filtros de fecha: </p>
+                      {filters.map((f, idx) => (
+                        <button
+                          key={idx}
+                          className="btn btn-primary btn-xs border text-white"
+                          style={{
+                            backgroundColor:
+                              idx === selectFilter ? "#fff" : "#4a00ff",
+                            color: idx === selectFilter ? "#4a00ff" : "#fff",
+                          }}
+                          onClick={() => filterDataByDate(f)}
+                        >
+                          {f}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                {tabSelected === 2 && (
+                  <div className="overflow-hidden rounded-xl border border-gray-200">
+                    <div className="h-[50vh] overflow-x-auto">
+                      <table className="table table-zebra table-pin-rows table-xs">
+                        <thead>
+                          <tr>
+                            <th>Acción</th>
+                            <th>Tipo</th>
+                            <th>$ Invertido</th>
+                            <th>Cantidad</th>
+                            <th>Fecha</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {transactions.map((t, i) => (
+                            <tr key={i}>
+                              <td>
+                                <StockTableColumn
+                                  stock={stocks.find(
+                                    (s) => s.id === Number(t.stockId),
+                                  )}
+                                />
+                              </td>
+                              <td>{t.type}</td>
+                              <td>$ {t.invested}</td>
+                              <td>{(t.invested / t.stockCost).toFixed(0)}</td>
+                              <td>
+                                {t.createdAt
+                                  .replace("T", " ")
+                                  .replace(/\:\d{2}\.\d{3}Z$/, "")}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {tabSelected === 3 && (
+                  <div className="overflow-hidden rounded-xl border border-gray-200">
+                    <div className="h-[50vh] overflow-x-auto">
+                      <table className="table table-zebra table-pin-rows table-xs">
+                        <thead>
+                          <tr>
+                            <th>Acción</th>
+                            <th>Ganancia</th>
+                            <th>Invertido $</th>
+                            <th>Cantidad</th>
+                            <th>Acciones</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {stocksInPossession.map((p, i) => (
+                            <tr key={i}>
+                              <td>
+                                <StockTableColumn
+                                  stock={stocks.find(
+                                    (s) => s.id === Number(p.stockId),
+                                  )}
+                                />
+                              </td>
+                              <StockGanancia
+                                quantity={p.quantity}
+                                stock={stocks.find(
+                                  (s) => s.id === Number(p.stockId),
+                                )}
+                                stocksLatestPrice={stocksLatestPrice}
+                                totalCost={p.totalCost}
+                              />
+                              <td>{Number(p.totalCost).toFixed(2)}$</td>
+                              <td>{p.quantity}</td>
+                              <td>
+                                <button
+                                  className="btn btn-primary btn-xs"
+                                  onClick={() => sellStock(p)}
+                                >
+                                  Vender todo
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {tabSelected === 4 && (
+                  <div className="h-[50vh] rounded-xl border border-gray-200">
+                    <div>Aqui está la simiulación</div>
+                  </div>
+                )}
               </div>
-              <div className="h-[50vh] w-4/12 rounded-xl border-2 border-gray-200">
+              <div className="h-[50vh] w-4/12 rounded-xl border border-gray-200">
                 <div className="h-5/6 overflow-auto px-1.5 py-4">
                   {mensajes.map((m, idx) => (
                     <div
@@ -369,3 +600,6 @@ export default function HomePage() {
     </main>
   );
 }
+
+// TODO:
+// verificar que tengas más de lo que cueste el stock
